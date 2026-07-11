@@ -1,0 +1,267 @@
+import hashlib
+import random
+import time
+import matplotlib.pyplot as plt
+
+# Métricas
+#############################################################
+
+operations = {
+    "permutacao": 0,
+    "inversao": 0,
+    "composicao": 0,
+    "hash": 0,
+    "verificacao": 0
+}
+
+op_times = {
+    etapa: []
+    for etapa in ["permutacao", "inversao", "composicao", "hash"]
+}
+
+memory = []
+
+# Variáveis
+#############################################################
+
+# Lista de adjacência
+# Transformação do Grafo em lista de adjacencia
+# Cada posição contém apenas os vizinhos
+# O(n^2) -> O(n+m) vertices + arestas
+G1 = [
+    [1, 2],
+    [0, 2],
+    [0, 1]
+]
+
+# Isomorfismo secreto conhecido apenas pelo provador
+phi = [2, 0, 1]
+
+
+# Operações com permutação
+#############################################################
+
+# Necessária para responder o desafio
+# O(n)
+def inverse_perm(permutation):
+    """Calcula a inversa de uma permutação."""
+
+    start = time.perf_counter()
+    inverse = [0] * len(permutation)
+
+    for i, value in enumerate(permutation):
+        inverse[value] = i
+
+    op_times["inversao"].append(time.perf_counter() - start)
+    operations["inversao"] += 1
+
+    return inverse
+
+# Usada quando o desafio exige demonstrar o isomorfismo com G2.
+# O(n)
+def compose(first, second):
+    """Composição de duas permutações."""
+
+    start = time.perf_counter()
+
+    result = [
+        first[second[i]]
+        for i in range(len(first))
+    ]
+
+    op_times["composicao"].append(time.perf_counter() - start)
+    operations["composicao"] += 1
+
+    return result
+
+# Grafo precisa ser convertido para uma sequência binária por causa do Hash
+# número de vizinhos + lista de vizinhos
+def serialize_graph(graph):
+    """
+    Serializa o grafo em bytes.
+    Cada vértice armazena:
+        - número de vizinhos
+        - lista de vizinhos
+    """
+
+    data = bytearray()
+    for adjacency in graph:
+        data.extend(len(adjacency).to_bytes(2, "little"))
+        for vertex in sorted(adjacency):
+            data.extend(vertex.to_bytes(2, "little"))
+
+    return bytes(data)
+
+# Antes O(n^2) -> O(n+m) lista de vizinhos
+def permute_graph(graph, permutation):
+    """Aplica uma permutação aos vértices do grafo."""
+
+    start = time.perf_counter()
+
+    n = len(graph)
+    new_graph = [[] for _ in range(n)] # Nova lista de adjacencia
+
+    for vertex, adjacency in enumerate(graph):
+        new_vertex = permutation[vertex]
+
+        for neighbor in adjacency:
+            new_graph[new_vertex].append(permutation[neighbor])
+    for adjacency in new_graph:
+        adjacency.sort() # Ordenação para facilitar comparação
+
+    op_times["permutacao"].append(time.perf_counter() - start)
+    operations["permutacao"] += 1
+
+    return new_graph
+
+# Antes, para cada rodada gerava um novo desafio - b = random.randint(0, 1)
+# Gera um desafio para várias rodadas
+def challenge_bits(commitments):
+    """Gera todos os desafios utilizando SHA-256."""
+    start = time.perf_counter()
+    buffer = bytearray()
+
+    for graph in commitments:
+        buffer.extend(serialize_graph(graph))
+
+    digest = hashlib.sha256(buffer).digest() # Digest possui 256 bits, cada bit é um desafio. Se precisar mais, gera de novo
+    bits = []
+
+    while len(bits) < len(commitments):
+        for byte in digest:
+            for bit in range(8):
+                bits.append((byte >> bit) & 1)
+                if len(bits) >= len(commitments):
+                    break
+            if len(bits) >= len(commitments):
+                break
+        if len(bits) < len(commitments):
+            digest = hashlib.sha256(digest).digest()
+
+    op_times["hash"].append(time.perf_counter() - start)
+    operations["hash"] += 1
+
+    return bits
+
+
+# Implementação
+#############################################################
+
+def run(rounds):
+
+    # Calcula G2 pelo isomorfismo secreto
+    G2 = permute_graph(G1, phi)
+
+    # Aqui calculamos uma vez só, antes calculava em todas rodadas
+    phi_inverse = inverse_perm(phi)
+
+    n = len(G1)
+    edges = sum(len(adj) for adj in G1)
+
+    commitments = []
+    permutations = []
+
+    # Gera os compromissos
+    for _ in range(rounds):
+        pi = list(range(n))
+        random.shuffle(pi)
+
+        permutations.append(pi)
+        commitments.append(permute_graph(G1, pi))
+
+    # Antes, gerava os desafios em todos as rodadas
+    # Agora, gera antes das rodadas
+    bits = challenge_bits(commitments)
+
+    proof = []
+    accepted = True
+
+    # Rodadas
+    for round_number, (H, pi, bit) in enumerate(
+        zip(commitments, permutations, bits),
+        start=1
+    ):
+        if bit == 0:
+            sigma = inverse_perm(pi)
+            target = G1
+        else:
+            sigma = compose(
+                phi_inverse,
+                inverse_perm(pi)
+            )
+            target = G2
+        
+        # Precisa reconstruir G1 ou G2
+        valid = permute_graph(H, sigma) == target
+
+        operations["verificacao"] += 1
+        accepted &= valid
+
+        # Provas são armazenadas
+        # Antes, só importava o accept final
+        # Agora, importa em todo momento
+        proof.append((H, sigma, bit))
+
+        # Memória
+        memory.append(
+            3 * (n + edges) + 2 * n + 32
+        )
+        print(f"Rodada {round_number}: "f"desafio={bit} "f"aceito={valid}")
+
+    return accepted, proof
+
+# Gráficos
+#############################################################
+
+# Tempo medio por etapa
+def timePerStep():
+    average_times = {
+        key: (sum(values) / len(values)) * 1000
+        for key, values in op_times.items()
+        if values
+    }
+
+    plt.figure(figsize=(8, 5))
+    plt.bar(average_times.keys(), average_times.values())
+    plt.tight_layout()
+    plt.savefig("tempo_etapas.png")
+    plt.close()
+
+# Numero de operacoes em cada etapa
+def numberOperations():
+    plt.figure(figsize=(8, 5))
+    plt.bar(operations.keys(), operations.values())
+    plt.tight_layout()
+    plt.savefig("num_operacoes.png")
+    plt.close()
+
+# Memoria
+def memoryUsage():
+    plt.figure(figsize=(8, 5))
+    plt.plot(
+        range(1, len(memory) + 1),
+        memory,
+        marker="o"
+    )
+    plt.tight_layout()
+    plt.savefig("memoria.png")
+    plt.close()
+
+
+# Executar
+#############################################################
+rounds = 40
+
+start = time.perf_counter()
+accepted, proof = run(rounds)
+end = time.perf_counter()
+
+print("\nResultado Final")
+print("----------------------")
+print("Aceito:", accepted)
+print(f"Tempo total: {(end - start) * 1000} ms")
+print("Número de provas:", len(proof))
+
+timePerStep()
+numberOperations()
+memoryUsage()
